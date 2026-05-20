@@ -11,7 +11,10 @@ import os.path as osp
 import sys
 import time
 import datetime
-import gnureadline
+try:
+    import gnureadline  # Optional; original script imports it but it is not required here.
+except ImportError:
+    gnureadline = None
 import argparse
 import glob
 
@@ -54,10 +57,15 @@ def get_metadata(args, dir_name, video_path):
 
     found_cnt = 0
     found = False
+    frame_pos = None
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+
+        # CAP_PROP_POS_FRAMES points to the next frame after read().
+        # Store the actual frame index that was just scanned.
+        current_frame_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
 
         if args.calib_path != "":
             frame = cv2.remap(frame, mapx, mapy, cv2.INTER_LINEAR)
@@ -77,10 +85,9 @@ def get_metadata(args, dir_name, video_path):
             continue
 
         found = True
+        frame_pos = current_frame_pos
         data_str = codes[0].decode("utf-8")
         break
-
-    frame_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
 
     cap.release()
     cv2.destroyAllWindows()
