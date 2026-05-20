@@ -53,7 +53,13 @@ def sync_videos(args, df):
         if invalid:
             continue
 
-        command_str = f"ffmpeg -i {video_path} -n -loglevel error -ss {start_sec} -c:v libx264 -c:a aac -frames:v {nb_crop_frames} -r {args.out_fps} -vf scale={args.width}:-2 {out_path}"
+        # Keep original codec, resolution, and frame rate; only trim in time.
+        duration = nb_crop_frames / row.fps
+        # -ss before -i: cleaner GOP boundary with -c copy (reduces black frames at start).
+        command_str = (
+            f"ffmpeg -ss {start_sec} -i {video_path} -n -loglevel error -t {duration} "
+            f"-c copy -avoid_negative_ts make_zero {out_path}"
+        )
         if int(row.camera_id) in args.process_id_list:
             print(command_str)
             if not args.debug:
@@ -70,15 +76,38 @@ def sync_videos(args, df):
                 invalid = True
         if invalid:
             return
-        if args.vis_dir == "":
-            vis_dir = "vis"
+        if args.vis_dir:
+            vis_dir = args.vis_dir
         else:
-            vis_dir = osp.join(args.root_dir + "_sync", "vis")
+            vis_dir = osp.join(args.out_dir, "vis")
         os.makedirs(vis_dir, exist_ok=True)
-        out_path = osp.join(vis_dir, f"{out_id}_vis.mp4")
-        vis_video_paths = [out_path for out_path, (index, row) in zip(out_paths, df.iterrows()) if row.camera_id in args.camera_id_list]
+        vis_out_path = osp.join(vis_dir, f"{out_id}_vis.mp4")
+        vis_video_paths = [
+            synced_path
+            for synced_path, (_, cam_row) in zip(out_paths, df.iterrows())
+            if int(cam_row.camera_id) in args.camera_id_list
+        ]
+        if len(vis_video_paths) != 6:
+            print(f"[WARN] tile vis expects 6 cameras, got {len(vis_video_paths)}; skip vis for {out_id}")
+            return
+
+        tw = int(args.vis_tile_width)
         input_str = " ".join([f"-i {video_path}" for video_path in vis_video_paths])
-        command_str = f'ffmpeg {input_str} -n -loglevel error -filter_complex "[0:v]scale=720:-2[v1];[1:v]scale=720:-2[v2];[2:v]scale=720:-2[v3];[3:v]scale=720:-2[v4];[4:v]scale=720:-2[v5];[5:v]scale=720:-2[v6];[v1][v2][v3][v4][v5][v6]xstack=inputs=6:layout=0_0|w0+w4_0|0_h0|w0+w4_h0|w0_h0|w0_0:shortest=1[v]" -map [v] -map 4:a -c:a copy {out_path}'
+        filter_complex = (
+            f"[0:v]scale={tw}:-2[v1];[1:v]scale={tw}:-2[v2];[2:v]scale={tw}:-2[v3];"
+            f"[3:v]scale={tw}:-2[v4];[4:v]scale={tw}:-2[v5];[5:v]scale={tw}:-2[v6];"
+            f"[v1][v2][v3][v4][v5][v6]xstack=inputs=6:layout=0_0|w0+w4_0|0_h0|w0+w4_h0|w0_h0|w0_0:shortest=1[v]"
+        )
+        encode_opts = (
+            f"-c:v libx264 -preset {args.vis_preset} -crf {int(args.vis_crf)} -pix_fmt yuv420p "
+            f"-c:a aac -b:a {int(args.vis_audio_kbps)}k"
+        )
+        if args.vis_fps > 0:
+            encode_opts += f" -r {float(args.vis_fps)}"
+        command_str = (
+            f'ffmpeg {input_str} -n -loglevel error -filter_complex "{filter_complex}" '
+            f'-map "[v]" -map 4:a {encode_opts} {vis_out_path}'
+        )
         print(command_str)
         if not args.debug:
             subprocess.run(command_str, shell=True)
@@ -93,13 +122,46 @@ def main():
     parser.add_argument('root_dir', type=str)  # e.g. ./videos_251001
     parser.add_argument('--date', type=str, default="01/01")
     parser.add_argument('--out_dir', type=str, default="./export")
-    parser.add_argument('--vis_dir', type=str, default="")
+    parser.add_argument(
+        '--vis_dir',
+        type=str,
+        default="",
+        help='Tile vis output directory (default: <out_dir>/vis).',
+    )
     parser.add_argument('--camera_id_list', type=int, nargs="+", default=[1, 2, 3, 4, 5, 6])
     parser.add_argument('--process_id_list', type=int, nargs="*", default=[1, 2, 3, 4, 5, 6])
-    parser.add_argument('--out_width', type=int, default=1920)
-    parser.add_argument('--out_fps', type=str, default=30000/1001)  # type str
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--vis', action='store_true')
+    parser.add_argument(
+        '--vis-tile-width',
+        type=int,
+        default=480,
+        help='Per-camera tile width in px for --vis (default 480, was hardcoded 720).',
+    )
+    parser.add_argument(
+        '--vis-crf',
+        type=int,
+        default=28,
+        help='x264 CRF for tile vis output; higher = lower quality/smaller file (default 28).',
+    )
+    parser.add_argument(
+        '--vis-preset',
+        type=str,
+        default='veryfast',
+        help='x264 preset for tile vis (default veryfast).',
+    )
+    parser.add_argument(
+        '--vis-audio-kbps',
+        type=int,
+        default=96,
+        help='AAC bitrate for tile vis audio (default 96).',
+    )
+    parser.add_argument(
+        '--vis-fps',
+        type=float,
+        default=0.0,
+        help='Output fps for tile vis; 0 keeps source fps (default 0).',
+    )
     parser.add_argument('--blacklist_path', type=str, default="./blacklist.txt")
     args = parser.parse_args()
 
